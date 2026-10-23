@@ -212,6 +212,8 @@ class _ImportStudentsScreenState extends State<ImportStudentsScreen> {
       for (final r in _rows) {
         final name = _val(r, 'name');
         final roll = _val(r, 'rollNo').replaceAll('/', '-');
+        final email = _val(r, 'email').toLowerCase();
+        final phone = _val(r, 'phone');
         if (name.isEmpty || roll.isEmpty || !seen.add(roll)) {
           skipped++;
           continue;
@@ -219,8 +221,8 @@ class _ImportStudentsScreenState extends State<ImportStudentsScreen> {
         entries[roll] = {
           'name': name,
           'rollNo': roll,
-          'email': _val(r, 'email'),
-          'phone': _val(r, 'phone'),
+          'email': email,
+          'phone': phone,
           'importedAt': FieldValue.serverTimestamp(),
         };
       }
@@ -235,11 +237,214 @@ class _ImportStudentsScreenState extends State<ImportStudentsScreen> {
         await b.commit();
       }
 
+      await _linkExistingAccounts(batchId, entries);
+      await _allocateQueueSlots(batchId, entries.keys.toList());
+
       _snack('Imported ${entries.length} students into "$batchId"'
-          '${skipped > 0 ? ' ($skipped rows skipped: blank or duplicate roll no.)' : ''}.');
+          '${skipped > 0 ? ' ($skipped rows skipped: required fields were blank or enrollment numbers were duplicated.)' : ''}.');
       if (mounted) Navigator.pop(context);
     } catch (e) {
       _snack('Import failed: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _linkExistingAccounts(
+      String batchId, Map<String, Map<String, dynamic>> entries) async {
+    if (entries.isEmpty) return;
+    final users = await _db
+        .collection('users')
+        .where('departmentId', isEqualTo: widget.me.departmentId)
+        .get();
+    final students = users.docs.where((d) {
+      final p = d.data();
+      return p['role'] == 'student' && p['requestedRole'] != 'teacher' && p['batchId'] == batchId;
+    }).toList();
+    final roster = await _db.collection('batches/$batchId/roster').get();
+    final rosterById = {for (final d in roster.docs) d.id: d.data()};
+    final links = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{};
+    for (final entry in entries.entries) {
+      final id = entry.key;
+      final row = entry.value;
+      final byRoll = students.where((d) {
+        final p = d.data();
+        return (p['rollNo'] == id || p['requestedRollNo'] == id) &&
+            (p['name'] ?? '').toString().trim().toLowerCase() ==
+                (row['name'] ?? '').toString().trim().toLowerCase();
+      }).toList();
+      final matches = byRoll.isNotEmpty
+          ? byRoll
+          : students.where((d) {
+              final p = d.data();
+              return p['rollNo'] == null && p['requestedRollNo'] == null &&
+                  (p['name'] ?? '').toString().trim().toLowerCase() ==
+                      (row['name'] ?? '').toString().trim().toLowerCase();
+            }).toList();
+      final alreadyLinked = rosterById[id]?['authUid'];
+      if (matches.length == 1 &&
+          (alreadyLinked == null || alreadyLinked == matches.single.id)) {
+        links[id] = matches.single;
+      }
+    }
+
+    final ids = links.keys.toList();
+    // Rules validate each profile against its roster row via getAfter(); keep
+    // each atomic link small enough for Firestore's rules access-call limit.
+    for (var i = 0; i < ids.length; i += 10) {
+      final b = _db.batch();
+      for (final id in ids.skip(i).take(10)) {
+        final link = MapEntry(id, links[id]!);
+        final uid = link.value.id;
+        final profile = link.value.data();
+        b.set(
+          _db.doc('batches/$batchId/roster/${link.key}'),
+          {
+            'authUid': uid,
+            'linkedEmail': profile['email'] ?? '',
+            'linkedPhone': profile['phone'] ?? '',
+            'linkedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+        if (profile['rollNo'] == null) {
+          b.update(_db.collection('users').doc(uid), {'rollNo': link.key});
+        }
+      }
+      await b.commit();
+    }
+  }
+
+  Future<void> _allocateQueueSlots(String batchId, List<String> addedIds) async {
+    if (addedIds.isEmpty) return;
+    final sessions = await _db
+        .collection('sessions')
+        .where('batchId', isEqualTo: batchId)
+        .where('departmentId', isEqualTo: widget.me.departmentId)
+        .get();
+    final roster = await _db.collection('batches/$batchId/roster').get();
+    final allStudentIds = roster.docs.map((d) => d.id).toList()..sort();
+
+    for (final sessionDoc in sessions.docs) {
+      final session = sessionDoc.data();
+      if (!['scheduled', 'live'].contains(session['status'])) continue;
+      try {
+        final groupsRef = _db.collection('sessions/${sessionDoc.id}/groups');
+        final groups = await groupsRef.orderBy('number').get();
+        final size = ((session['groupSize'] as num?)?.toInt() ?? 4).clamp(1, 100).toInt();
+        final actions = <({DocumentReference<Map<String, dynamic>> ref, Map<String, dynamic> data, bool update})>[];
+
+        if (groups.docs.isEmpty) {
+          for (var i = 0; i < allStudentIds.length; i += size) {
+            final number = i ~/ size + 1;
+            actions.add((ref: groupsRef.doc('g$number'), update: false, data: {
+              'number': number,
+              'status': 'waiting',
+              'studentIds': allStudentIds.skip(i).take(size).toList(),
+            }));
+          }
+        } else {
+          final assigned = groups.docs
+              .expand((d) => List<String>.from(d.data()['studentIds'] ?? []))
+              .toSet();
+          final pending = addedIds.where((id) => !assigned.contains(id)).toList();
+          final additions = <String, List<String>>{};
+          var lastNumber = groups.docs
+              .map((d) => (d.data()['number'] as num?)?.toInt() ?? 0)
+              .fold<int>(0, (max, n) => n > max ? n : max);
+
+          for (final studentId in pending) {
+            final waiting = groups.docs.where((d) {
+              final data = d.data();
+              final current = List<String>.from(data['studentIds'] ?? []);
+              return data['status'] == 'waiting' &&
+                  current.length + (additions[d.id]?.length ?? 0) < size;
+            }).firstOrNull;
+            if (waiting != null) {
+              additions.putIfAbsent(waiting.id, () => []).add(studentId);
+            } else {
+              lastNumber++;
+              actions.add((ref: groupsRef.doc('g$lastNumber'), update: false, data: {
+                'number': lastNumber,
+                'status': 'waiting',
+                'studentIds': [studentId],
+              }));
+            }
+          }
+          for (final addition in additions.entries) {
+            actions.add((ref: groupsRef.doc(addition.key), update: true, data: {
+              'studentIds': FieldValue.arrayUnion(addition.value),
+            }));
+          }
+        }
+        for (var i = 0; i < actions.length; i += 400) {
+          final b = _db.batch();
+          for (final action in actions.skip(i).take(400)) {
+            if (action.update) {
+              b.update(action.ref, action.data);
+            } else {
+              b.set(action.ref, action.data);
+            }
+          }
+          await b.commit();
+        }
+      } catch (_) {
+        // An unassigned teacher may import a roster but cannot alter this session's queue.
+      }
+    }
+  }
+
+  Future<void> _addManually() async {
+    if (_batchId == null || _batchId == '__new__') {
+      _snack('Choose an existing branch and year first.');
+      return;
+    }
+    final name = TextEditingController();
+    final roll = TextEditingController();
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Add a student'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: name, textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(labelText: 'Student name')),
+          const SizedBox(height: 12),
+          TextField(controller: roll, textCapitalization: TextCapitalization.characters,
+              decoration: const InputDecoration(labelText: 'Enrollment number')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+          FilledButton(onPressed: () {
+            final cleanName = name.text.trim();
+            final cleanRoll = roll.text.trim().replaceAll('/', '-');
+            if (cleanName.isNotEmpty && cleanRoll.isNotEmpty) {
+              Navigator.pop(dialogContext, {'name': cleanName, 'rollNo': cleanRoll});
+            }
+          }, child: const Text('Add to class list')),
+        ],
+      ),
+    );
+    name.dispose();
+    roll.dispose();
+    if (result == null) return;
+
+    setState(() => _busy = true);
+    try {
+      final batchId = _batchId!;
+      final entry = {
+        'name': result['name']!,
+        'rollNo': result['rollNo']!,
+        'email': '',
+        'phone': '',
+        'importedAt': FieldValue.serverTimestamp(),
+      };
+      await _db.doc('batches/$batchId/roster/${result['rollNo']}')
+          .set(entry, SetOptions(merge: true));
+      await _linkExistingAccounts(batchId, {result['rollNo']!: entry});
+      await _allocateQueueSlots(batchId, [result['rollNo']!]);
+      _snack('Added ${result['name']} to the class list. Their queue slot is ready for eligible sessions.');
+    } catch (e) {
+      _snack('Could not add student: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -302,6 +507,14 @@ class _ImportStudentsScreenState extends State<ImportStudentsScreen> {
         const SizedBox(height: 24),
         Text('2. Upload the class list (.xlsx or .csv)',
             style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 4),
+        const Text('Import a class list once, or add a student manually. Matching portal accounts are linked automatically; students can sign in before they are added.'),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          icon: const Icon(Icons.person_add_alt_1),
+          label: const Text('Add one student manually'),
+          onPressed: _busy ? null : _addManually,
+        ),
         const SizedBox(height: 8),
         OutlinedButton.icon(
           icon: const Icon(Icons.upload_file),
@@ -346,6 +559,7 @@ class _ImportStudentsScreenState extends State<ImportStudentsScreen> {
                 DataColumn(label: Text('Roll no.')),
                 DataColumn(label: Text('Name')),
                 DataColumn(label: Text('Email')),
+                DataColumn(label: Text('Phone')),
               ],
               rows: _rows
                   .take(5)
@@ -353,6 +567,7 @@ class _ImportStudentsScreenState extends State<ImportStudentsScreen> {
                         DataCell(Text(_val(r, 'rollNo'))),
                         DataCell(Text(_val(r, 'name'))),
                         DataCell(Text(_val(r, 'email'))),
+                        DataCell(Text(_val(r, 'phone'))),
                       ]))
                   .toList(),
             ),

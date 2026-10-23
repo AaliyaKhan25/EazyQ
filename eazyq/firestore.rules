@@ -1,49 +1,129 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
-
     function signedIn() { return request.auth != null; }
-    function me() { return get(/databases/$(db)/documents/users/$(request.auth.uid)).data; }
-    function isStudent() { return signedIn() && me().role == 'student'; }
-    function isTeacher() { return signedIn() && me().role == 'teacher'; }
-    function isAdmin()   { return signedIn() && me().role == 'deptAdmin'; }
-    function isHod()     { return isAdmin() && me().designation == 'hod'; }
-    function isProf()    { return isTeacher() && me().designation == 'professor'; }
-    function sameDept(d) { return signedIn() && me().departmentId == d; }
-
+    function profilePath(uid) { return /databases/$(db)/documents/users/$(uid); }
+    function rosterPath(bid, rid) { return /databases/$(db)/documents/batches/$(bid)/roster/$(rid); }
+    function hasProfile(uid) { return exists(profilePath(uid)); }
+    function me() { return get(profilePath(request.auth.uid)).data; }
+    function accountActive() {
+      return !('accountStatus' in me()) || me().accountStatus == 'active';
+    }
+    function isStudent() {
+      return signedIn() && hasProfile(request.auth.uid) && (
+        (me().role == 'student' && accountActive())
+        || (me().role == 'teacher' && me().authorizationStatus == 'pending'
+          && me().accountStatus == 'pending'));
+    }
+    function isTeacher() {
+      return signedIn() && hasProfile(request.auth.uid) && me().role == 'teacher'
+        && me().authorizationStatus == 'approved' && accountActive();
+    }
+    function isAdmin() {
+      return signedIn() && hasProfile(request.auth.uid) && me().role == 'deptAdmin' && accountActive();
+    }
+    function isHod() { return isAdmin() && me().designation == 'hod'; }
+    function isProf() { return isTeacher() && me().designation == 'professor'; }
+    function sameDept(d) { return signedIn() && hasProfile(request.auth.uid) && me().departmentId == d; }
+    function batch(bid) { return get(/databases/$(db)/documents/batches/$(bid)).data; }
+    function validBasicSignup() {
+      let p = request.resource.data;
+      let b = batch(p.batchId);
+      return p.role == 'student' && p.accountStatus == 'active'
+        && p.email.lower() == request.auth.token.email.lower()
+        && p.name is string && p.name.size() > 0
+        && p.phone is string && p.phone.size() > 0
+        && p.departmentId == b.departmentId && p.branch == b.branch && p.year == b.year
+        && (!('requestedRole' in p)
+          || (p.requestedRole == 'teacher'
+            && p.authorizationStatus == 'pending'
+            && (p.designation == 'professor' || p.designation == 'assistantProfessor')));
+    }
+    function staffLinksStudent(uid) {
+      let p = resource.data;
+      let r = getAfter(rosterPath(p.batchId, request.resource.data.rollNo)).data;
+      return (isHod() || isTeacher() || isAdmin())
+        && sameDept(p.departmentId) && p.role == 'student'
+        && p.name.trim().lower() == r.name.trim().lower()
+        && r.rollNo == request.resource.data.rollNo
+        && r.authUid == uid
+        && request.resource.data.diff(p).affectedKeys().hasOnly(['rollNo'])
+        && (!('rollNo' in p) || p.rollNo == request.resource.data.rollNo);
+    }
+    function selfAssignsRosterRoll(uid) {
+      let p = resource.data;
+      let r = get(rosterPath(p.batchId, request.resource.data.rollNo)).data;
+      return request.auth.uid == uid && p.role == 'student'
+        && p.requestedRollNo == request.resource.data.rollNo
+        && r.rollNo == request.resource.data.rollNo
+        && r.authUid == uid && r.name.trim().lower() == p.name.trim().lower()
+        && request.resource.data.diff(p).affectedKeys().hasOnly(['rollNo']);
+    }
+    function selfLinksRoster(id, rid) {
+      let p = get(profilePath(request.auth.uid)).data;
+      return request.resource.data.authUid == request.auth.uid
+        && p.role == 'student' && p.accountStatus == 'active'
+        && p.batchId == id && p.requestedRollNo == rid
+        && resource.data.rollNo == rid
+        && p.email.lower() == request.auth.token.email.lower()
+        && p.name.trim().lower() == resource.data.name.trim().lower()
+        && (!('email' in resource.data) || resource.data.email == ''
+          || resource.data.email.lower() == p.email.lower())
+        && (!('authUid' in resource.data) || resource.data.authUid == request.auth.uid)
+        && request.resource.data.linkedEmail == p.email
+        && request.resource.data.linkedPhone == p.phone
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'authUid', 'linkedEmail', 'linkedPhone', 'linkedAt'
+        ]);
+    }
     function session(sid) { return get(/databases/$(db)/documents/sessions/$(sid)).data; }
-    function batchDept(b) { return get(/databases/$(db)/documents/batches/$(b)).data.departmentId; }
     function isExaminer(sid) { return isTeacher() && request.auth.uid in session(sid).examinerIds; }
     function canRun(sid) { return isExaminer(sid) || isHod(); }
     function canSeeSession(sid) {
       return (isStudent() && session(sid).batchId == me().batchId)
-          || (!isStudent() && sameDept(session(sid).departmentId));
+          || ((isTeacher() || isAdmin()) && sameDept(session(sid).departmentId));
     }
-
     match /users/{uid} {
       allow read: if signedIn() && (request.auth.uid == uid
-                  || (!isStudent() && sameDept(resource.data.departmentId)));
-      allow create: if isAdmin() && sameDept(request.resource.data.departmentId);
-      allow update: if (isAdmin() && sameDept(resource.data.departmentId))
-        || (request.auth.uid == uid
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fcmTokens']));
+        || ((isHod() || isTeacher() || isAdmin()) && sameDept(resource.data.departmentId)));
+      // Anyone can create a basic active student account for an existing
+      // batch. Staff applicants stay students until an HOD authorizes them.
+      allow create: if signedIn() && request.auth.uid == uid
+        && validBasicSignup();
+      allow update: if (request.auth.uid == uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fcmTokens']))
+        || selfAssignsRosterRoll(uid)
+        || staffLinksStudent(uid)
+        || (isHod() && sameDept(resource.data.departmentId)
+          && resource.data.role in ['student', 'teacher']
+          && resource.data.requestedRole == 'teacher'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'role', 'authorizationStatus', 'accountStatus', 'approvedBy', 'approvedAt'
+          ])
+          && request.resource.data.role == 'teacher'
+          && request.resource.data.authorizationStatus == 'approved'
+          && request.resource.data.accountStatus == 'active');
       allow delete: if isHod() && sameDept(resource.data.departmentId);
     }
 
-    // Batches + imported student roster. Any teacher or dept admin can create
-    // a batch and import a student list.
+    // Batch metadata is needed during account setup. It contains no student
+    // contact information; roster rows remain individually protected.
     match /batches/{id} {
-      allow read: if signedIn() && sameDept(resource.data.departmentId);
-      allow create: if (isAdmin() || isTeacher()) && sameDept(request.resource.data.departmentId);
-      allow update, delete: if (isAdmin() || isTeacher()) && sameDept(resource.data.departmentId);
+      allow read: if signedIn();
+      allow create: if (isHod() || isAdmin() || isTeacher()) && sameDept(request.resource.data.departmentId);
+      allow update, delete: if (isHod() || isAdmin() || isTeacher()) && sameDept(resource.data.departmentId);
 
       match /roster/{rid} {
-        allow read: if signedIn() && !isStudent() && sameDept(batchDept(id));
-        allow write: if (isAdmin() || isTeacher()) && sameDept(batchDept(id));
+        allow get: if signedIn() && (isHod() || isTeacher() || isAdmin())
+          && sameDept(batch(id).departmentId);
+        allow list: if (isHod() || isTeacher() || isAdmin()) && sameDept(batch(id).departmentId);
+        allow create, delete: if (isHod() || isAdmin() || isTeacher()) && sameDept(batch(id).departmentId);
+        allow update: if ((isHod() || isAdmin() || isTeacher())
+            && sameDept(batch(id).departmentId))
+          || (signedIn() && selfLinksRoster(id, rid));
       }
     }
 
-    // Marking schemes: HOD and professors define them.
     match /schemes/{id} {
       allow read: if signedIn() && sameDept(resource.data.departmentId);
       allow create: if (isHod() || isProf()) && sameDept(request.resource.data.departmentId);
@@ -52,8 +132,8 @@ service cloud.firestore {
 
     match /sessions/{sid} {
       allow read: if signedIn() && (
-            (isStudent() && resource.data.batchId == me().batchId)
-         || (!isStudent() && sameDept(resource.data.departmentId)));
+        (isStudent() && resource.data.batchId == me().batchId)
+        || ((isTeacher() || isAdmin()) && sameDept(resource.data.departmentId)));
       allow create: if (isHod() || isProf()) && sameDept(request.resource.data.departmentId);
       allow update: if canRun(sid);
       allow delete: if isHod() && sameDept(resource.data.departmentId);
@@ -64,10 +144,9 @@ service cloud.firestore {
       }
 
       match /marks/{studentId} {
-        // A student's marks doc id is their roll number (roster id).
         allow read: if (isStudent() && resource.data.published == true
-                        && (request.auth.uid == studentId || me().rollNo == studentId))
-                    || (!isStudent() && sameDept(session(sid).departmentId));
+                        && me().rollNo == studentId)
+                    || ((isTeacher() || isAdmin()) && sameDept(session(sid).departmentId));
         allow create: if canRun(sid);
         allow update: if canRun(sid) && (resource.data.locked != true || isHod());
         allow delete: if isHod();

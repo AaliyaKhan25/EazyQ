@@ -53,7 +53,10 @@ class _CreateSessionScreenState extends State<CreateSessionScreen> {
       setState(() {
         _batches = b.docs;
         _schemes = s.docs;
-        _teachers = u.docs.where((d) => d.data()['role'] == 'teacher').toList();
+        _teachers = u.docs
+            .where((d) => d.data()['role'] == 'teacher' &&
+                d.data()['authorizationStatus'] == 'approved')
+            .toList();
         if (widget.me.role == Role.teacher) _examiners.add(widget.me.uid);
         _loading = false;
       });

@@ -5,18 +5,19 @@
 | Role (`role`) | Designation | Can do |
 |---|---|---|
 | `deptAdmin` | `hod` | Everything in the department: users, batches, schemes, sessions, run sessions, enter/unlock marks, export |
-| `teacher` | `professor` | Define marking schemes, create sessions, run sessions, enter marks, export |
-| `teacher` | `assistantProfessor` | Run sessions they are assigned to (examiner), enter marks, export |
+| `teacher` | `professor` | After HOD approval: define marking schemes, create sessions, run assigned sessions, enter marks, export |
+| `teacher` | `assistantProfessor` | After HOD approval: run assigned sessions, enter marks, export |
 | `deptAdmin` | (none/office) | Manage users and batches, export. Cannot edit marks |
 | `student` | n/a | See live queue for own batch, own group, own marks (only after published) |
 
-Rules are enforced in `firestore.rules`. `Profile.can()` in `lib/core/roles.dart` only hides UI.
+Rules are enforced in `firestore.rules`. `Profile.can()` in `lib/core/roles.dart` only hides UI. Students can create an active basic account and view their batch's viva sessions before their name is added to a class list. Enrollment is optional at signup. When a teacher imports a spreadsheet or adds a student manually, EazyQ links a matching account and the student becomes identifiable in the queue. Staff applicants also start with basic student access; HOD approval upgrades their account to teacher permissions. Only approved teachers can be assigned to sessions or enter marks.
 
 ## Firestore model
 
 ```
-users/{uid}        name, role, designation?, departmentId, rollNo?, branch?, year?, batchId?, fcmTokens[]
+users/{uid}        name, email, phone, role, requestedRole?, authorizationStatus?, designation?, departmentId, requestedRollNo?, rollNo?, branch?, year?, batchId?, fcmTokens[]
 batches/{id}       departmentId, branch, year, section
+  roster/{enrollmentNo} name, rollNo, email?, phone?, authUid?, linkedEmail?, linkedPhone?
 schemes/{id}       departmentId, name, fields: [{key,label,max}]   // file, viva, practical, attendance, midsem...
 sessions/{sid}     departmentId, batchId, schemeId, subject, type(viva|internal|external),
                    room, status(scheduled|live|closed), examinerIds[], avgMinutesPerGroup
@@ -30,10 +31,10 @@ The next waiting group gets a "You're next" push. Absent students go to the last
 
 ## Setup
 1. `flutter create .` then `flutter pub get`
-2. Create a Firebase project, run `flutterfire configure`, enable Auth (email/password), Firestore, Cloud Messaging.
-3. Deploy: `firebase deploy --only firestore:rules,functions`
-4. Seed the first HOD manually in the console: create an Auth user, then a `users/{uid}` doc with `role: deptAdmin`, `designation: hod`, `departmentId`. After that, the HOD creates everyone else.
-5. Not yet built (next steps): login screen, teacher dashboard (call next / start / finish buttons wired to `QueueService`), admin screens, Excel import (AI column mapping via Cloud Function), Excel export, saving FCM token to `users/{uid}.fcmTokens`.
+2. Create a Firebase project, run `flutterfire configure`, enable Auth (email/password and Google), Firestore, Cloud Messaging. Configure the platform OAuth client for Google sign-in.
+3. Deploy the database rules: `firebase deploy --only firestore:rules --project eazyq-e1c17`
+4. Seed the first HOD manually in the Firebase Console or with the Admin SDK: create an Auth user, then a `users/{uid}` doc with `role: deptAdmin`, `designation: hod`, `accountStatus: active`, and `departmentId`. HOD status is never available through public self-registration.
+5. Students and staff create accounts with email/password or Google and can immediately open the basic portal. Students may enter an enrollment number now or wait until they are added to the class list. Teachers can import Excel/CSV rosters or add a student manually; matching accounts are linked, and rebuilding the session groups allocates queue slots. Staff accounts remain basic until the HOD authorizes them, which upgrades the profile and enables teacher permissions.
 
 ## Getting Started
 

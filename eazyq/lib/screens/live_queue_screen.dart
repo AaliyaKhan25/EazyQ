@@ -69,7 +69,7 @@ class _SessionCard extends StatelessWidget {
               child: SelectableText('Groups error: ${s.error}'));
         final all = s.data!.docs.map(Group.fromDoc).toList();
         final mine =
-            all.where((g) => g.studentIds.contains(me.uid)).firstOrNull;
+            all.where((g) => me.rollNo != null && g.studentIds.contains(me.rollNo)).firstOrNull;
         final inside = all.where((g) => g.status == 'inProgress').firstOrNull;
         final called = all.where((g) => g.status == 'called').firstOrNull;
         final ahead = mine == null

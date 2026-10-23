@@ -27,6 +27,7 @@ class Profile {
   final Designation? designation; // teachers + admins only
   final String? rollNo, branch, batchId;
   final int? year;
+  final String accountStatus;
 
   Profile({
     required this.uid,
@@ -38,6 +39,7 @@ class Profile {
     this.branch,
     this.batchId,
     this.year,
+    this.accountStatus = 'active',
   });
 
   factory Profile.fromMap(String uid, Map<String, dynamic> m) => Profile(
@@ -50,6 +52,7 @@ class Profile {
         branch: m['branch'],
         batchId: m['batchId'],
         year: m['year'],
+        accountStatus: m['accountStatus'] ?? 'active',
       );
 
   bool get isHod => designation == Designation.hod;

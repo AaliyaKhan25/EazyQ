@@ -1,3 +1,4 @@
+import 'screens/staff_dashboard.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -63,9 +64,8 @@ class AuthGate extends StatelessWidget {
                 case Role.student:
                   return LiveQueueScreen(me: me);
                 case Role.teacher:
-                  return _Placeholder(title: 'TODO: teacher dashboard');
                 case Role.deptAdmin:
-                  return _Placeholder(title: 'TODO: admin dashboard');
+                  return StaffDashboard(me: me);
               }
             },
           );

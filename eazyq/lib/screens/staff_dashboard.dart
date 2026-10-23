@@ -48,17 +48,8 @@ class StaffDashboard extends StatelessWidget {
         ],
       ),
       body: ListView(padding: const EdgeInsets.fromLTRB(20, 12, 20, 28), children: [
-        Text('Good to see you, ${me.name}',
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  color: const Color(0xFF182230),
-                )),
-        const SizedBox(height: 6),
-        Text('$_title · Your department workspace',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: const Color(0xFF667085),
-                )),
-        const SizedBox(height: 20),
+        _StaffWelcome(name: me.name, title: _title),
+        const SizedBox(height: 18),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(18),
@@ -152,11 +143,17 @@ class StaffDashboard extends StatelessWidget {
                       width: 46,
                       height: 46,
                       decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.primaryContainer,
+                        gradient: LinearGradient(
+                          colors: status == 'live'
+                              ? const [Color(0xFFD6F7E6), Color(0xFFB9EFD2)]
+                              : [Theme.of(context).colorScheme.primaryContainer, Colors.white],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
                         borderRadius: BorderRadius.circular(14),
                       ),
-                      child: Icon(Icons.assignment_outlined,
-                          color: Theme.of(context).colorScheme.primary),
+                      child: Icon(status == 'live' ? Icons.graphic_eq_rounded : Icons.assignment_rounded,
+                          color: status == 'live' ? const Color(0xFF18864B) : Theme.of(context).colorScheme.primary),
                     ),
                     title: Text(m['subject'] ?? 'Untitled session',
                         style: const TextStyle(fontWeight: FontWeight.w600)),
@@ -174,12 +171,18 @@ class StaffDashboard extends StatelessWidget {
                             color: status == 'live' ? const Color(0xFFE7F6EE) : const Color(0xFFF0F2F6),
                             borderRadius: BorderRadius.circular(20),
                           ),
-                          child: Text(status,
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            if (status == 'live') ...[
+                              const Icon(Icons.circle, size: 7, color: Color(0xFF18864B)),
+                              const SizedBox(width: 5),
+                            ],
+                            Text(status,
                               style: TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
                                 color: status == 'live' ? const Color(0xFF18864B) : const Color(0xFF596579),
                               )),
+                          ]),
                         ),
                         const SizedBox(height: 4),
                         const Icon(Icons.chevron_right, size: 20),
@@ -195,4 +198,43 @@ class StaffDashboard extends StatelessWidget {
       ]),
     );
   }
+}
+
+class _StaffWelcome extends StatelessWidget {
+  final String name, title;
+  const _StaffWelcome({required this.name, required this.title});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(22),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF1A2942), Color(0xFF315CDB)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [BoxShadow(color: const Color(0xFF315CDB).withOpacity(.18), blurRadius: 20, offset: const Offset(0, 9))],
+        ),
+        child: Stack(children: [
+          Positioned(right: -22, top: -26, child: Icon(Icons.dashboard_customize_rounded, size: 130, color: Colors.white.withOpacity(.08))),
+          Row(children: [
+            CircleAvatar(
+              radius: 25,
+              backgroundColor: Colors.white.withOpacity(.15),
+              foregroundColor: Colors.white,
+              child: Icon(title == 'HOD' ? Icons.admin_panel_settings_rounded : Icons.person_rounded, size: 27),
+            ),
+            const SizedBox(width: 14),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('GOOD TO SEE YOU', style: TextStyle(color: Color(0xFFCFDAF5), fontSize: 10, letterSpacing: 1.3, fontWeight: FontWeight.w700)),
+              Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 21, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 3),
+              Text('$title · Department workspace', style: const TextStyle(color: Color(0xFFDDE6FF), fontSize: 13)),
+            ])),
+            const SizedBox(width: 8),
+            const Icon(Icons.auto_awesome_rounded, color: Color(0xFFFFD780), size: 23),
+          ]),
+        ]),
+      );
 }

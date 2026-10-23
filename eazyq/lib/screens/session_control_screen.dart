@@ -1,5 +1,10 @@
+import 'dart:typed_data';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:excel/excel.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import '../core/roles.dart';
 import '../models/models.dart';
 import '../services/queue_service.dart';
@@ -27,6 +32,7 @@ class _SessionControlScreenState extends State<SessionControlScreen> {
   Map<String, Map<String, dynamic>> _roster = {};
   Scheme? _scheme;
   bool _ready = false;
+  bool _exporting = false;
 
   @override
   void initState() {
@@ -206,6 +212,86 @@ class _SessionControlScreenState extends State<SessionControlScreen> {
     );
   }
 
+  Future<void> _exportMarksReport(Session session) async {
+    if (_exporting) return;
+    setState(() => _exporting = true);
+    try {
+      await _loadRoster(session.batchId);
+      if (_roster.isEmpty) throw StateError('This batch has no student roster yet.');
+      final marksSnapshot = await _db
+          .collection('sessions/${session.id}/marks')
+          .get();
+      final marks = {for (final d in marksSnapshot.docs) d.id: d.data()};
+      var scheme = _scheme;
+      if (scheme == null) {
+        final schemeDoc = await _db.collection('schemes').doc(session.schemeId).get();
+        if (schemeDoc.exists) scheme = Scheme.fromDoc(schemeDoc);
+      }
+      final fields = scheme?.fields ?? const <MarkField>[];
+      final workbook = Excel.createExcel();
+      final sheet = workbook[workbook.getDefaultSheet() ?? 'Sheet1'];
+      final headers = [
+        'Enrollment number',
+        'Student name',
+        ...fields.map((field) => '${field.label} / ${_fmt(field.max)}'),
+        'Total',
+        'Maximum',
+        'Status',
+        'Published',
+      ];
+      sheet.appendRow(headers.map((value) => TextCellValue(value)).toList());
+      final ids = _roster.keys.toList()..sort(_cmp);
+      for (final id in ids) {
+        final roster = _roster[id]!;
+        final mark = marks[id];
+        final values = mark?['values'] is Map
+            ? Map<String, dynamic>.from(mark!['values'] as Map)
+            : <String, dynamic>{};
+        sheet.appendRow([
+          TextCellValue(id),
+          TextCellValue('${roster['name'] ?? ''}'),
+          ...fields.map((field) {
+            final value = values[field.key];
+            return value is num
+                ? DoubleCellValue(value.toDouble())
+                : TextCellValue('');
+          }),
+          if (mark?['total'] is num)
+            DoubleCellValue((mark!['total'] as num).toDouble())
+          else
+            TextCellValue(''),
+          DoubleCellValue(fields.fold<double>(0, (sum, field) => sum + field.max)),
+          TextCellValue(mark == null ? 'Not marked' : 'Marked'),
+          TextCellValue(mark?['published'] == true ? 'Yes' : 'No'),
+        ]);
+      }
+      final safeSubject = session.subject.replaceAll(RegExp(r'[^A-Za-z0-9_-]+'), '_');
+      final fileName = 'EazyQ_${safeSubject}_marks.xlsx';
+      if (kIsWeb) {
+        workbook.save(fileName: fileName);
+      } else {
+        final bytes = workbook.encode();
+        if (bytes == null) throw StateError('Could not build the Excel workbook.');
+        final savedPath = await FilePicker.platform.saveFile(
+          dialogTitle: 'Download marks report',
+          fileName: fileName,
+          type: FileType.custom,
+          allowedExtensions: const ['xlsx'],
+          bytes: Uint8List.fromList(bytes),
+        );
+        if (savedPath == null) {
+          _snack('Report download canceled.');
+          return;
+        }
+      }
+      _snack('Marks report is ready.');
+    } catch (e) {
+      _snack('Could not export marks report: $e');
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final sid = widget.sessionId;
@@ -274,10 +360,30 @@ class _SessionControlScreenState extends State<SessionControlScreen> {
                             children: [
                               Text(
                                   '${session.room ?? 'No room'} · batch ${session.batchId} · ${_roster.length} students'),
-                              const SizedBox(height: 4),
-                              Text(
-                                  'Done $done / ${groups.length} · $waiting waiting · ${totals.length} marked'),
                               const SizedBox(height: 12),
+                              Wrap(spacing: 8, runSpacing: 8, children: [
+                                _SessionStat(label: 'Groups', value: '${groups.length}', icon: Icons.groups_rounded, color: const Color(0xFF315CDB)),
+                                _SessionStat(label: 'Waiting', value: '$waiting', icon: Icons.hourglass_top_rounded, color: const Color(0xFFE09A26)),
+                                _SessionStat(label: 'Completed', value: '$done', icon: Icons.check_circle_rounded, color: const Color(0xFF218A5A)),
+                                _SessionStat(label: 'Marked', value: '${totals.length}', icon: Icons.edit_note_rounded, color: const Color(0xFF8057C7)),
+                              ]),
+                              const SizedBox(height: 12),
+                              OutlinedButton.icon(
+                                onPressed: _exporting
+                                    ? null
+                                    : () => _exportMarksReport(session),
+                                icon: _exporting
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(strokeWidth: 2),
+                                      )
+                                    : const Icon(Icons.download_outlined),
+                                label: Text(_exporting
+                                    ? 'Preparing report…'
+                                    : 'Download marks report'),
+                              ),
+                              const SizedBox(height: 4),
                               if (groups.isEmpty)
                                 FilledButton.icon(
                                   icon: const Icon(Icons.groups),
@@ -390,4 +496,26 @@ class _SessionControlScreenState extends State<SessionControlScreen> {
       },
     );
   }
+}
+
+class _SessionStat extends StatelessWidget {
+  final String label, value;
+  final IconData icon;
+  final Color color;
+  const _SessionStat({required this.label, required this.value, required this.icon, required this.color});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        constraints: const BoxConstraints(minWidth: 95),
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+        decoration: BoxDecoration(color: color.withOpacity(.08), borderRadius: BorderRadius.circular(14)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 7),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(value, style: TextStyle(color: color, fontWeight: FontWeight.w800, fontSize: 16)),
+            Text(label, style: TextStyle(color: Colors.blueGrey.shade600, fontSize: 10)),
+          ]),
+        ]),
+      );
 }

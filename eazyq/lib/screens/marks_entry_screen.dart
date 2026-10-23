@@ -27,6 +27,7 @@ class _MarksEntryScreenState extends State<MarksEntryScreen> {
     for (final f in widget.scheme.fields) f.key: TextEditingController()
   };
   bool _loading = true;
+  bool _saving = false;
 
   @override
   void initState() {
@@ -64,6 +65,7 @@ class _MarksEntryScreenState extends State<MarksEntryScreen> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
   Future<void> _save() async {
+    if (_saving) return;
     final values = <String, double>{};
     for (final f in widget.scheme.fields) {
       final t = _c[f.key]!.text.trim();
@@ -75,6 +77,7 @@ class _MarksEntryScreenState extends State<MarksEntryScreen> {
       }
       values[f.key] = v;
     }
+    setState(() => _saving = true);
     try {
       await QueueService().saveMarks(widget.sessionId, widget.studentId,
           widget.scheme, values, widget.teacher.uid);
@@ -83,6 +86,8 @@ class _MarksEntryScreenState extends State<MarksEntryScreen> {
       _snack(e.message.toString());
     } catch (e) {
       _snack('Could not save: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -102,6 +107,7 @@ class _MarksEntryScreenState extends State<MarksEntryScreen> {
                   padding: const EdgeInsets.only(bottom: 12),
                   child: TextField(
                     controller: _c[f.key],
+                    enabled: !_saving,
                     keyboardType:
                         const TextInputType.numberWithOptions(decimal: true),
                     decoration: InputDecoration(
@@ -122,7 +128,17 @@ class _MarksEntryScreenState extends State<MarksEntryScreen> {
                   );
                 },
               ),
-              FilledButton(onPressed: _save, child: const Text('Save marks')),
+              FilledButton.icon(
+                onPressed: _saving ? null : _save,
+                icon: _saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.save_outlined),
+                label: Text(_saving ? 'Saving marks…' : 'Save marks'),
+              ),
             ]),
     );
   }

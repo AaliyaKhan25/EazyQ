@@ -8,6 +8,7 @@ import 'core/roles.dart';
 import 'firebase_options.dart';
 import 'screens/live_queue_screen.dart';
 import 'screens/login_screen.dart';
+import 'screens/staff_dashboard.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

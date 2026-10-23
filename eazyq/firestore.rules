@@ -12,6 +12,7 @@ service cloud.firestore {
     function sameDept(d) { return signedIn() && me().departmentId == d; }
 
     function session(sid) { return get(/databases/$(db)/documents/sessions/$(sid)).data; }
+    function batchDept(b) { return get(/databases/$(db)/documents/batches/$(b)).data.departmentId; }
     function isExaminer(sid) { return isTeacher() && request.auth.uid in session(sid).examinerIds; }
     function canRun(sid) { return isExaminer(sid) || isHod(); }
     function canSeeSession(sid) {
@@ -29,11 +30,20 @@ service cloud.firestore {
       allow delete: if isHod() && sameDept(resource.data.departmentId);
     }
 
+    // Batches + imported student roster. Any teacher or dept admin can create
+    // a batch and import a student list.
     match /batches/{id} {
       allow read: if signedIn() && sameDept(resource.data.departmentId);
-      allow write: if isAdmin() && sameDept(request.resource.data.departmentId);
+      allow create: if (isAdmin() || isTeacher()) && sameDept(request.resource.data.departmentId);
+      allow update, delete: if (isAdmin() || isTeacher()) && sameDept(resource.data.departmentId);
+
+      match /roster/{rid} {
+        allow read: if signedIn() && !isStudent() && sameDept(batchDept(id));
+        allow write: if (isAdmin() || isTeacher()) && sameDept(batchDept(id));
+      }
     }
 
+    // Marking schemes: HOD and professors define them.
     match /schemes/{id} {
       allow read: if signedIn() && sameDept(resource.data.departmentId);
       allow create: if (isHod() || isProf()) && sameDept(request.resource.data.departmentId);
@@ -54,7 +64,9 @@ service cloud.firestore {
       }
 
       match /marks/{studentId} {
-        allow read: if (isStudent() && request.auth.uid == studentId && resource.data.published == true)
+        // A student's marks doc id is their roll number (roster id).
+        allow read: if (isStudent() && resource.data.published == true
+                        && (request.auth.uid == studentId || me().rollNo == studentId))
                     || (!isStudent() && sameDept(session(sid).departmentId));
         allow create: if canRun(sid);
         allow update: if canRun(sid) && (resource.data.locked != true || isHod());

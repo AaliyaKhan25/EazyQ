@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function me() { return get(/databases/$(db)/documents/users/$(request.auth.uid)).data; }
+    function isStudent() { return signedIn() && me().role == 'student'; }
+    function isTeacher() { return signedIn() && me().role == 'teacher'; }
+    function isAdmin()   { return signedIn() && me().role == 'deptAdmin'; }
+    function isHod()     { return isAdmin() && me().designation == 'hod'; }
+    function isProf()    { return isTeacher() && me().designation == 'professor'; }
+    function sameDept(d) { return signedIn() && me().departmentId == d; }
+
+    function session(sid) { return get(/databases/$(db)/documents/sessions/$(sid)).data; }
+    function isExaminer(sid) { return isTeacher() && request.auth.uid in session(sid).examinerIds; }
+    function canRun(sid) { return isExaminer(sid) || isHod(); }
+    function canSeeSession(sid) {
+      return (isStudent() && session(sid).batchId == me().batchId)
+          || (!isStudent() && sameDept(session(sid).departmentId));
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid
+                  || (!isStudent() && sameDept(resource.data.departmentId)));
+      allow create: if isAdmin() && sameDept(request.resource.data.departmentId);
+      allow update: if (isAdmin() && sameDept(resource.data.departmentId))
+        || (request.auth.uid == uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fcmTokens']));
+      allow delete: if isHod() && sameDept(resource.data.departmentId);
+    }
+
+    match /batches/{id} {
+      allow read: if signedIn() && sameDept(resource.data.departmentId);
+      allow write: if isAdmin() && sameDept(request.resource.data.departmentId);
+    }
+
+    match /schemes/{id} {
+      allow read: if signedIn() && sameDept(resource.data.departmentId);
+      allow create: if (isHod() || isProf()) && sameDept(request.resource.data.departmentId);
+      allow update, delete: if (isHod() || isProf()) && sameDept(resource.data.departmentId);
+    }
+
+    match /sessions/{sid} {
+      allow read: if signedIn() && (
+            (isStudent() && resource.data.batchId == me().batchId)
+         || (!isStudent() && sameDept(resource.data.departmentId)));
+      allow create: if (isHod() || isProf()) && sameDept(request.resource.data.departmentId);
+      allow update: if canRun(sid);
+      allow delete: if isHod() && sameDept(resource.data.departmentId);
+
+      match /groups/{gid} {
+        allow read: if canSeeSession(sid);
+        allow write: if canRun(sid);
+      }
+
+      match /marks/{studentId} {
+        allow read: if (isStudent() && request.auth.uid == studentId && resource.data.published == true)
+                    || (!isStudent() && sameDept(session(sid).departmentId));
+        allow create: if canRun(sid);
+        allow update: if canRun(sid) && (resource.data.locked != true || isHod());
+        allow delete: if isHod();
+      }
+    }
+  }
+}
